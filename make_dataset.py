@@ -15,6 +15,7 @@ from transformer_lens.utils import tokenize_and_concatenate
 
 
 DATASET_ALIASES = {
+    "pile-uncopyrighted": "monology/pile-uncopyrighted",
     "openwebtext": "stas/openwebtext-10k",
     "owt": "stas/openwebtext-10k",
     "pile": "NeelNanda/pile-10k",
@@ -145,40 +146,41 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     torch.set_grad_enabled(False)
-    model = HookedTransformer.from_pretrained(args.model, device='cpu')
+    model = HookedTransformer.from_pretrained("gpt2", device='cpu')
     model_family = get_model_family(args.model)
+    
+    # load the dataset abd take first 100 examples (also doesnt load full dataset into disk)
+    dataset = datasets.load_dataset(
+        args.hf_dataset,
+        split=args.hf_dataset_split,
+        streaming=True 
+    ).take(100)  
 
-    # get data
-    if args.hf_dataset in DATASET_ALIASES:
-        dataset = get_dataset(args.hf_dataset)
-    elif args.hf_dataset == 'EleutherAI/pile':
-        print('Downloading pile')
-        dataset = get_pile_split(args.hf_dataset_split)
-    else:
-        dataset = datasets.load_dataset(
-            args.hf_dataset, split=args.hf_dataset_split, streaming=True)
+    # Prepare for token accumulation
+    all_tokens = []
+    total_tokens = 0
 
-    # tokenize and save
-    if args.hf_dataset == 'EleutherAI/pile':
-        ds_dict = tokenize_pile_subsets(dataset, model, ctx_len=args.ctx_len)
-        for subset, sub_ds in ds_dict.items():
-            subset_name = PILE_SUBSET_ALIASES[subset]
-            save_path = os.path.join(
-                args.output_dir, model_family,
-                f'pile.{args.hf_dataset_split}.{subset_name}.{args.ctx_len}'
-            )
-            os.makedirs(save_path, exist_ok=True)
-            sub_ds.save_to_disk(save_path)
-    else:
-        if args.n_seq > 0:
-            dataset = dataset.select(range(args.n_seq))
+    # Iterate through examples and tokenizes the text and truncates to 512 tokes (transformer limit)
+    for example in dataset:
+        tokens = model.tokenizer.encode(example['text'], truncation=True, max_length=512)
+        all_tokens.extend(tokens)
+        total_tokens += len(tokens)
+        if total_tokens >= 100:
+            break  
 
-        token_dataset = tokenize_and_concatenate(
-            dataset, model.tokenizer, max_length=args.ctx_len)
 
-        save_path = os.path.join(
-            args.output_dir, model_family,
-            f'{args.hf_dataset}.{args.n_seq}.{args.ctx_len}'
-        )
-        os.makedirs(save_path, exist_ok=True)
-        token_dataset.save_to_disk(save_path)
+    # Convert to pytorch tensor
+    final_tokens = torch.tensor(all_tokens[:100])[None, :]  # Add batch dimension
+
+    # Create hugginhface dataset
+    token_dataset = datasets.Dataset.from_dict({
+        'tokens': final_tokens
+    })
+
+    # Save
+    save_path = os.path.join(
+        args.output_dir, model_family,
+        f'{args.hf_dataset}.100tokens.{args.ctx_len}'
+    )
+    os.makedirs(save_path, exist_ok=True)
+    token_dataset.save_to_disk(save_path)

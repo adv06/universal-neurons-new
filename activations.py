@@ -12,6 +12,8 @@ from utils import get_model_family
 from torch.utils.data import DataLoader
 from transformer_lens import HookedTransformer
 from transformer_lens.utils import lm_cross_entropy_loss
+from transformers import AutoTokenizer
+from transformer_lens.utils import tokenize_and_concatenate
 
 
 def quantize_neurons(activation_tensor, output_precision=8):
@@ -75,6 +77,9 @@ def process_masked_layer_activation_batch(batch_activations, batch_mask, activat
 
 def get_layer_activations(args, model, dataset, device):
 
+    if isinstance(dataset['tokens'], list):
+        dataset = dataset.map(lambda x: {'tokens': np.array(x['tokens'])}, batched=True)
+    
     index_mask = None if 'index_mask' not in dataset.column_names \
         else dataset['index_mask']
 
@@ -287,7 +292,7 @@ if __name__ == '__main__':
 
     # general arguments
     parser.add_argument(
-        '--model', default='pythia-70m',
+        '--model', default='stanford-crfm/alias-gpt2-small-x21',
         help='Name of model from TransformerLens')
     parser.add_argument(
         '--token_dataset',
@@ -312,6 +317,12 @@ if __name__ == '__main__':
         '--neuron_subset_file', default=None,
         help='name of csv file containing a layer,neuron pairs with additional metadata)')
 
+    parser.add_argument(
+      '--revision', 
+      default='checkpoint-397000',
+      help='Model checkpoint revision for HF Hub'
+    )
+
     # saving arguments
     parser.add_argument(
         '--save_precision', default=8, type=int)
@@ -328,19 +339,39 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else (
         'mps' if torch.backends.mps.is_available() else 'cpu'))
 
-    model = HookedTransformer.from_pretrained(args.model, device='cpu')
-    model.to(device)
+    # load model 
+    model = HookedTransformer.from_pretrained(
+      args.model,
+      device=device,
+      checkpoint_value=397000,  # Specifies the exact training step
+    ) 
+    
+    # model.to(device)
+
+    # model configuration
     model.eval()
     torch.set_grad_enabled(False)
     model_family = get_model_family(args.model)
 
-    tokenized_dataset = datasets.load_from_disk(
-        os.path.join(
-            os.getenv('DATASET_DIR', 'token_datasets'),
-            model_family,
-            args.token_dataset
-        )
+    dataset_path = "/content/universal-neurons/token_datasets/gpt2/monology/pile"
+    # In dataset loading block:
+    
+    tokenized_dataset = datasets.load_from_disk(dataset_path)
+
+    # gpt2 vocab leangth with model.cfg.d_vocab-1 (clips vocab)
+    # load pre tokenized data into disk
+    tokenized_dataset = tokenized_dataset.map(
+        lambda x: {"tokens": np.clip(x["tokens"], 0, model.cfg.d_vocab - 1)},
+        batched=True,
+        batch_size=1000
     )
+
+    #set data format
+    tokenized_dataset.set_format(type='torch', columns=['tokens'])
+    if 'tokens' not in tokenized_dataset.column_names:
+        raise KeyError("Missing tokens column")
+    
+    # Validate token IDs
 
     if args.neuron_subset is not None or args.neuron_subset_file is not None:
         if args.neuron_subset is not None:
@@ -353,4 +384,6 @@ if __name__ == '__main__':
             args, model, tokenized_dataset, device, neuron_subset)
 
     else:
+
+      # get the layer activations
         get_layer_activations(args, model, tokenized_dataset, device)
