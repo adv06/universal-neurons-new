@@ -182,7 +182,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        '--model', default='pythia-70m',
+        '--model', default='stanford-crfm/alias-gpt2-small-x21',
         help='Name of model from TransformerLens')
     parser.add_argument(
         '--token_dataset',
@@ -203,18 +203,30 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = HookedTransformer.from_pretrained(args.model, device='cpu')
+    model = HookedTransformer.from_pretrained(
+      args.model,
+      device=device,
+      checkpoint_value=397000,  # Specifies the exact training step
+    )
     model.to(device)
     model.eval()
     torch.set_grad_enabled(False)
-    model_family = get_model_family(args.model)
+    dataset_path = "/content/universal-neurons/token_datasets/gpt2/monology/pile"
+    # In dataset loading block:
+    
+    tokenized_dataset = datasets.load_from_disk(dataset_path)
 
-    tokenized_dataset = datasets.load_from_disk(
-        os.path.join(
-            os.getenv('DATASET_DIR', 'token_datasets'),
-            model_family,
-            args.token_dataset
-        )
+    # gpt2 vocab leangth with model.cfg.d_vocab-1 (clips vocab)
+    # load pre tokenized data into disk
+    tokenized_dataset = tokenized_dataset.map(
+        lambda x: {"tokens": np.clip(x["tokens"], 0, model.cfg.d_vocab - 1)},
+        batched=True,
+        batch_size=1000
     )
+
+    #set data format
+    tokenized_dataset.set_format(type='torch', columns=['tokens'])
+    if 'tokens' not in tokenized_dataset.column_names:
+        raise KeyError("Missing tokens column")
 
     summarize_activations(args, model, tokenized_dataset, device)
