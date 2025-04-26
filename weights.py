@@ -343,7 +343,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        '--model', default='pythia-70m',
+        '--model', default='stanford-crfm/alias-gpt2-small-x21',
         help='Name of model from TransformerLens')
     parser.add_argument(
         '--causal_only', action='store_true', default=False)
@@ -359,7 +359,16 @@ if __name__ == '__main__':
 
     print(f'{timestamp()} loading model')
     torch.set_grad_enabled(False)
-    model = HookedTransformer.from_pretrained(args.model, device='cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else (
+        'mps' if torch.backends.mps.is_available() else 'cpu'))
+
+    # load model 
+    model = HookedTransformer.from_pretrained(
+      args.model,
+      device=device,
+      checkpoint_value=397000,  # Specifies the exact training step
+    ) 
+    
 
     if args.compute_full_stats:
         # not recently tested
