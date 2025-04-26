@@ -353,7 +353,7 @@ if __name__ == '__main__':
     torch.set_grad_enabled(False)
     model_family = get_model_family(args.model)
 
-    dataset_path = "/content/universal-neurons/token_datasets/gpt2/monology/pile"
+    dataset_path = "/content/universal-neurons-new/token_datasets/gpt2/monology/pile"
     # In dataset loading block:
     
     tokenized_dataset = datasets.load_from_disk(dataset_path)
