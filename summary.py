@@ -1,115 +1,235 @@
 import os
+import time
 import numpy as np
 import tqdm
 import torch
 import einops
 import datasets
 import argparse
+from utils import *
 from torch.utils.data import DataLoader
 from transformer_lens import HookedTransformer
-from utils import *
-
-# Silence HuggingFace tokenizers warning
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def bin_activations(acts, edges, counts):
-    # acts: [L, D, T] → flatten T
-    L, D, T = acts.shape
-    flat = acts.reshape(L * D, T).contiguous()      # make contiguous for searchsorted
-    edges_c = edges.contiguous()
-    bins = torch.searchsorted(edges_c, flat)        # [L*D, T]
-    # bincount per row
-    bc = torch.stack([
-        torch.bincount(bins[i], minlength=edges_c.size(0) + 1)
-        for i in range(L * D)
-    ], dim=0)
-    counts[:] += bc.view(L, D, -1).to(counts.dtype)
+def bin_activations(activations, neuron_bin_edges, neuron_bin_counts):
+    # TODO filter out padding tokens
+    bin_index = torch.searchsorted(neuron_bin_edges, activations)
+
+    neuron_bin_counts[:] = neuron_bin_counts.scatter_add_(
+        2, bin_index, torch.ones_like(bin_index, dtype=torch.int32)
+    )
 
 
-def update_top_k(acts, idxs, vals, offset):
-    # acts: [L, D, T], idxs/vals: [L, D, K]
-    L, D, T = acts.shape
-    flat = acts.reshape(L * D, T)
-    positions = torch.arange(T, device=acts.device) + offset
-    flat_idx = idxs.view(-1, idxs.size(-1))
-    flat_val = vals.view(-1, vals.size(-1))
-    for i in range(L * D):
-        a = torch.cat([flat_val[i], flat[i]])
-        b = torch.cat([flat_idx[i], positions])
-        topk = torch.topk(a, flat_val.size(1))
-        flat_val[i] = a[topk.indices]
-        flat_idx[i] = b[topk.indices]
+def update_vocabulary_statistics(
+        batch, activations, neuron_vocab_max, neuron_vocab_sum, vocab_counts):
+    # TODO: reduce memory needs (perhaps compute by layer)
+    layers, neurons, tokens = activations.shape
+
+    vocab_index = batch.flatten()
+    extended_index = einops.repeat(  # flattened tokens per neuron
+        vocab_index, 't -> l n t', l=layers, n=neurons)
+
+    neuron_vocab_max[:] = neuron_vocab_max.scatter_reduce(
+        -1, extended_index, activations, reduce='max')
+
+    neuron_vocab_sum[:] = neuron_vocab_sum.scatter_reduce(
+        -1, extended_index, activations.to(torch.float32), reduce='sum')
+
+    token_ix, batch_count = torch.unique(vocab_index, return_counts=True)
+    vocab_counts[token_ix] += batch_count
 
 
-def save_act(x, hook):
-    hook.ctx['a'] = x.detach().cpu().float()
+def update_top_dataset_examples(
+        activations, neuron_max_activating_index, neuron_max_activating_value, index_offset):
+    n_layer, n_neuron, k = neuron_max_activating_value.shape
+
+    values = torch.cat([neuron_max_activating_value, activations], dim=2)
+
+    batch_indices = torch.arange(activations.shape[2]) + index_offset
+    extended_batch_indices = einops.repeat(
+        batch_indices, 't -> l n t', l=n_layer, n=n_neuron)
+    indices = torch.cat([
+        neuron_max_activating_index,
+        extended_batch_indices
+    ], dim=2)
+
+    # get top k
+    neuron_max_activating_value[:], top_k_indices = torch.topk(
+        values, k, dim=2)
+    neuron_max_activating_index[:] = torch.gather(indices, 2, top_k_indices)
 
 
-def summarize(args, model, ds, device):
-    dmlp, nlay = model.cfg.d_mlp, model.cfg.n_layers
-    L = min(nlay, args.max_layers)
+def save_activation(tensor, hook):
+    hook.ctx['activation'] = tensor.detach().to(torch.float16).cpu()
 
-    edges  = torch.linspace(-10, 15, args.n_bins)
-    counts = torch.zeros(L, dmlp, args.n_bins + 1, dtype=torch.int32)
-    idxs   = torch.zeros(L, dmlp, args.top_k, dtype=torch.int64)
-    vals   = torch.zeros(L, dmlp, args.top_k, dtype=torch.float32)
 
-    pre  = [f'blocks.{l}.mlp.hook_pre'  for l in range(L)]
-    post = [f'blocks.{l}.mlp.hook_post' for l in range(L)]
-    hooks = [(h, save_act) for h in pre + post]
+def summarize_activations(args, model, dataset, device):
 
-    dl = DataLoader(ds['tokens'], batch_size=args.batch_size, shuffle=False)
-    offset = 0
-    for batch in tqdm.tqdm(dl, disable=not args.verbose):
-        batch = batch.to(device)
-        model.run_with_hooks(batch, fwd_hooks=hooks)
+    d_mlp = model.cfg.d_mlp
+    n_layers = model.cfg.n_layers
+    d_vocab = model.cfg.d_vocab
 
-        p = torch.stack([model.hook_dict[h].ctx.pop('a') for h in pre], dim=2)
-        q = torch.stack([model.hook_dict[h].ctx.pop('a') for h in post], dim=2)
+    # TODO: make bin edges adaptive
+    neuron_bin_edges = torch.linspace(-10, 15, args.n_bins)
+    neuron_bin_counts = torch.zeros(
+        n_layers, d_mlp, args.n_bins+1, dtype=torch.int32)
+
+    neuron_vocab_max = torch.zeros(
+        n_layers, d_mlp, d_vocab, dtype=torch.float16)
+    neuron_vocab_sum = torch.zeros(  # for computing average
+        n_layers, d_mlp, d_vocab, dtype=torch.float32)
+    vocab_counts = torch.zeros(d_vocab)
+
+    neuron_max_activating_index = torch.zeros(
+        n_layers, d_mlp, args.top_k_dataset_examples, dtype=torch.int64)
+    neuron_max_activating_value = torch.zeros(
+        n_layers, d_mlp, args.top_k_dataset_examples, dtype=torch.float32)
+
+    # define hooks to save activations from each layer
+    pre_hooks = [f'blocks.{layer}.mlp.hook_pre' for layer in range(n_layers)]
+    post_hooks = [f'blocks.{layer}.mlp.hook_post' for layer in range(n_layers)]
+    all_hook_pts = pre_hooks + post_hooks
+    all_hooks = [(hook_pt, save_activation) for hook_pt in all_hook_pts]
+
+    dataloader = DataLoader(
+        dataset['tokens'], batch_size=args.batch_size, shuffle=False)
+
+    index_offset = 0
+    for step, batch in enumerate(tqdm.tqdm(dataloader)):
+        model.run_with_hooks(
+            batch.to(device),
+            fwd_hooks=all_hooks,
+        )
+        # stack and reformat activations
+        pre_acts = torch.stack([
+            model.hook_dict[hook_pt].ctx['activation'] for hook_pt in pre_hooks
+        ], dim=2)
+        post_acts = torch.stack([
+            model.hook_dict[hook_pt].ctx['activation'] for hook_pt in post_hooks
+        ], dim=2)
         model.reset_hooks()
 
-        p = einops.rearrange(p, 'b c l d -> l d (b c)')
-        q = einops.rearrange(q, 'b c l d -> l d (b c)')
+        pre_acts = einops.rearrange(
+            pre_acts, 'batch context l n -> l n (batch context)')
+        post_acts = einops.rearrange(
+            post_acts, 'batch context l n -> l n (batch context)')
 
-        bin_activations(p, edges, counts)
-        update_top_k(q, idxs, vals, offset)
+        # update neuron statistics (all performed in place)
+        bin_activations(pre_acts, neuron_bin_edges, neuron_bin_counts)
 
-        b, c = batch.shape
-        offset += b * c
+        update_vocabulary_statistics(
+            batch, post_acts, neuron_vocab_max, neuron_vocab_sum, vocab_counts)
 
-        del p, q
-        torch.cuda.empty_cache()
+        update_top_dataset_examples(
+            post_acts, neuron_max_activating_index, neuron_max_activating_value, index_offset)
 
-    out = os.path.join(args.output_dir, args.model.replace('/', '_'))
-    os.makedirs(out, exist_ok=True)
-    torch.save(counts, f'{out}/bin_counts.pt')
-    torch.save(edges,  f'{out}/bin_edges.pt')
-    torch.save(idxs,   f'{out}/topk_idxs.pt')
-    torch.save(vals,   f'{out}/topk_vals.pt')
+        batch_size, ctx_len = batch.shape
+        index_offset += batch_size * ctx_len
+
+    # save statistics (TODO: consider saving by layer; 8bit quantization)
+    save_path = os.path.join(
+        args.output_dir,
+        args.model,
+        'activations',
+        str(args.checkpoint),
+        args.token_dataset,
+    )
+    os.makedirs(save_path, exist_ok=True)
+
+    torch.save(neuron_bin_counts, os.path.join(
+        save_path, 'neuron_bin_counts.pt'))
+    torch.save(neuron_bin_edges, os.path.join(
+        save_path, 'neuron_bin_edges.pt'))
+    torch.save(neuron_max_activating_index, os.path.join(
+        save_path, 'neuron_max_activating_index.pt'))
+    torch.save(neuron_max_activating_value.to(torch.float16), os.path.join(
+        save_path, 'neuron_max_activating_value.pt'))
+
+    if args.top_vocab_k_truncate > 0:
+        # TODO: filter out averages with low counts
+        k = args.top_vocab_k_truncate
+        top_vocab_avg, top_vocab_avg_ixs = torch.topk(
+            neuron_vocab_sum / (vocab_counts + 1e-3), k, dim=-1)
+
+        top_vocab_max, top_vocab_max_ixs = torch.topk(
+            neuron_vocab_max.to(torch.float32), k, dim=-1)
+
+        # assumes <65536 vocab words (uint16 not implemented in pytorch)
+        top_vocab_avg_ixs = top_vocab_avg_ixs.numpy().astype(np.uint16)
+        top_vocab_max_ixs = top_vocab_max_ixs.numpy().astype(np.uint16)
+
+        torch.save(top_vocab_avg.to(torch.float16), os.path.join(
+            save_path, 'neuron_vocab_mean.pt'))
+        np.save(os.path.join(save_path, 'neuron_vocab_mean_ixs.npz'),
+                top_vocab_avg_ixs)
+        torch.save(top_vocab_max.to(torch.float16), os.path.join(
+            save_path, 'neuron_vocab_max.pt'))
+        np.save(os.path.join(save_path, 'neuron_vocab_max_ixs.npz'),
+                top_vocab_max_ixs)
+        torch.save(vocab_counts, os.path.join(
+            save_path, 'vocab_counts.pt'))
+    elif args.top_vocab_k_truncate == 0:  # don't save
+        pass
+    else:  # save all (-1)
+        torch.save(neuron_vocab_max, os.path.join(
+            save_path, 'neuron_vocab_max.pt'))
+        torch.save((neuron_vocab_sum / vocab_counts).to(torch.float16), os.path.join(
+            save_path, 'neuron_vocab_mean.pt'))
+        torch.save(vocab_counts, os.path.join(
+            save_path, 'vocab_counts.pt'))
 
 
 if __name__ == '__main__':
-    p = argparse.ArgumentParser()
-    p.add_argument('--model',        default='stanford-crfm/alias-gpt2-small-x21')
-    p.add_argument('--dataset_path', default='pile')
-    p.add_argument('--output_dir',   default='sum_data')
-    p.add_argument('--batch_size',   type=int, default=16)
-    p.add_argument('--n_bins',       type=int, default=64)
-    p.add_argument('--top_k',        type=int, default=20)
-    p.add_argument('--max_layers',   type=int, default=4)
-    p.add_argument('--verbose',      action='store_true')
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '--model', default='stanford-crfm/arwen-gpt2-medium-x21',
+        help='Name of model from TransformerLens')
+    parser.add_argument(
+    '--checkpoint', type=int, default=None,
+      help='Training step at which to load weights (e.g. 397000)'
+    )
+    parser.add_argument(
+        '--token_dataset', default="pile",
+        help='Name of cached feature dataset')
+    parser.add_argument(
+        '--output_dir', default='summary_data')
+    parser.add_argument(
+        '--batch_size', default=32, type=int)
+    parser.add_argument(
+        '--n_bins', default=256, type=int)
+    parser.add_argument(
+        '--top_k_dataset_examples', default=50, type=int,
+        help='Number of top dataset examples to save')
+    parser.add_argument(
+        '--top_vocab_k_truncate', default=100, type=int,
+        help='Number of top vocab words (by avg and max) to save (-1 for all)')
+
+    args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = HookedTransformer.from_pretrained(
-        args.model, device=device, checkpoint_value=397000
+        args.model, device=device, checkpoint_value=args.checkpoint
     ).to(device).eval()
     torch.set_grad_enabled(False)
+    # model_family = get_model_family(args.model)
 
-    ds = datasets.load_from_disk("/content/universal-neurons-new/token_datasets/gpt2/monology/pile")
-    ds = ds.map(lambda x: {'tokens': np.clip(x['tokens'], 0, model.cfg.d_vocab-1)},
-                batched=True, batch_size=500)
-    ds.set_format(type='torch', columns=['tokens'])
+    tokenized_dataset = datasets.load_from_disk("/content/universal-neurons-new/token_datasets/gpt2/pile")
+    max_length = model.cfg.n_ctx
 
-    summarize(args, model, ds, device)
+    tokenized_dataset = tokenized_dataset.map(
+        lambda x: {
+            "tokens": [
+                np.clip(
+                    seq[:max_length] + [0] * (max_length - len(seq)),  # Pad with zeros
+                    0,
+                    model.cfg.d_vocab - 1
+                )
+                for seq in x["tokens"]
+            ]
+        },
+        batched=True,
+        batch_size=args.batch_size
+    )
+    tokenized_dataset.set_format(type='torch', columns=['tokens'])
+    summarize_activations(args, model, tokenized_dataset, device)
