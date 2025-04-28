@@ -141,7 +141,8 @@ def get_layer_activations(args, model, dataset, device):
     save_path = os.path.join(
         args.output_dir,
         args.model,
-        args.token_dataset
+        args.token_dataset,
+        args.checkpoint
     )
     os.makedirs(save_path, exist_ok=True)
     agg = 'none' if args.activation_aggregation is None else args.activation_aggregation
@@ -296,10 +297,11 @@ if __name__ == '__main__':
         help='Name of model from TransformerLens')
     
     parser.add_argument(
-        '--checkpoint', default=400000,
-        help='Name of model from TransformerLens')
+    '--checkpoint', type=int, default=None,
+      help='Training step at which to load weights (e.g. 397000)'
+    )
     parser.add_argument(
-        '--token_dataset',
+        '--token_dataset', default="pile",
         help='Name of cached feature dataset')
     parser.add_argument(
         '--activation_location', default='mlp.hook_pre',
@@ -357,15 +359,26 @@ if __name__ == '__main__':
     torch.set_grad_enabled(False)
     model_family = get_model_family(args.model)
 
-    dataset_path = "/content/universal-neurons/token_datasets/gpt2/monology/pile"
+    dataset_path = "/content/universal-neurons-new/token_datasets/gpt2/pile"
     # In dataset loading block:
     
     tokenized_dataset = datasets.load_from_disk(dataset_path)
 
     # gpt2 vocab leangth with model.cfg.d_vocab-1 (clips vocab)
     # load pre tokenized data into disk
+    max_length = model.cfg.n_ctx
+
     tokenized_dataset = tokenized_dataset.map(
-        lambda x: {"tokens": np.clip(x["tokens"], 0, model.cfg.d_vocab - 1)},
+        lambda x: {
+            "tokens": [
+                np.clip(
+                    seq[:max_length] + [0] * (max_length - len(seq)),  # Pad with zeros
+                    0,
+                    model.cfg.d_vocab - 1
+                )
+                for seq in x["tokens"]
+            ]
+        },
         batched=True,
         batch_size=args.batch_size
     )
