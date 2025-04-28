@@ -294,6 +294,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--model', default='stanford-crfm/alias-gpt2-small-x21',
         help='Name of model from TransformerLens')
+    
+    parser.add_argument(
+        '--checkpoint', default=400000,
+        help='Name of model from TransformerLens')
     parser.add_argument(
         '--token_dataset',
         help='Name of cached feature dataset')
@@ -343,17 +347,17 @@ if __name__ == '__main__':
     model = HookedTransformer.from_pretrained(
       args.model,
       device=device,
-      checkpoint_value=397000,  # Specifies the exact training step
+      checkpoint_value=args.checkpoint,  # Specifies the exact training step
     ) 
     
-    # model.to(device)
+    model.to(device)
 
     # model configuration
     model.eval()
     torch.set_grad_enabled(False)
     model_family = get_model_family(args.model)
 
-    dataset_path = "/content/universal-neurons-new/token_datasets/gpt2/monology/pile"
+    dataset_path = "/content/universal-neurons/token_datasets/gpt2/monology/pile"
     # In dataset loading block:
     
     tokenized_dataset = datasets.load_from_disk(dataset_path)
@@ -363,7 +367,7 @@ if __name__ == '__main__':
     tokenized_dataset = tokenized_dataset.map(
         lambda x: {"tokens": np.clip(x["tokens"], 0, model.cfg.d_vocab - 1)},
         batched=True,
-        batch_size=1000
+        batch_size=args.batch_size
     )
 
     #set data format
