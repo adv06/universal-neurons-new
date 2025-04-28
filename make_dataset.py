@@ -24,7 +24,7 @@ if __name__ == '__main__':
         '--ctx_len', default=512, type=int,
         help='Max context length / sequence length')
     parser.add_argument(
-        '--n_tokens', default=20000000, type=int,
+        '--n_tokens', default=100000, type=int,
         help='Total number of tokens to accumulate') 
     parser.add_argument(
         '--output_dir', default='token_datasets',
@@ -77,5 +77,5 @@ if __name__ == '__main__':
     model_family = args.model.replace('/', '_')
     save_path = os.path.join(args.output_dir, model_family)
     os.makedirs(save_path, exist_ok=True)
-    hf_ds.save_to_disk(os.path.join(save_path, f"pile_{args.n_tokens:,}_tokens"))
+    hf_ds.save_to_disk(os.path.join(save_path, "pile"))
 
