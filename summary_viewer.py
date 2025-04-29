@@ -621,3 +621,59 @@ def display_summary(
             dataset_summaries, decoded_vocab, token_datasets, layer, neuron,
             display_k_per_dataset=display_k_per_dataset
         )
+
+def main():
+    # --- 1) Load the full 3D tensor of shape (n_layers, n_neurons, n_bins+1)
+    counts_path = (
+        "/content/"
+        "universal-neurons-new/summary_data/"
+        "stanford-crfm/alias-gpt2-small-x21/"
+        "activations/100000/pile/neuron_bin_counts.pt"
+    )
+    all_counts = torch.load(counts_path, map_location="cpu")
+    if all_counts.is_sparse:
+        all_counts = all_counts.to_dense()
+    all_counts = all_counts.numpy()  # now shape (L, N, B)
+
+    # --- 2) Load your bin edges (1D array of length B)
+    edges_path = (
+        "/content/"
+        "universal-neurons-new/summary_data/"
+        "stanford-crfm/alias-gpt2-small-x21/"
+        "activations/100000/pile/neuron_bin_edges.pt"
+    )
+    neuron_bin_edges = torch.load(edges_path, map_location="cpu").numpy()
+
+    # --- 3) Prepare output directory
+    out_dir = "plots/activation_distributions"
+    os.makedirs(out_dir, exist_ok=True)
+
+    n_layers, n_neurons, _ = all_counts.shape
+    total = n_layers * n_neurons
+    print(f"Generating {total} figures…")
+
+    # --- 4) Loop & save
+    for L in range(n_layers):
+        for N in range(n_neurons):
+            # slice to 1D
+            counts_1d = all_counts[L, N]  # shape (B,)
+
+            # wrap in a dict so the function knows its label
+            subset = {f"layer{L}_neuron{N}": counts_1d}
+
+            # 4a) call your existing plotting routine (it draws into plt)
+            plot_activation_distributions(subset, neuron_bin_edges)
+
+            # 4b) grab the current figure and save
+            fig = plt.gcf()
+            fname = os.path.join(out_dir, f"L{L}_N{N}.png")
+            fig.savefig(fname, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+        # optional progress report every layer
+        print(f"  • done layer {L+1}/{n_layers}")
+
+    print(f"All done! PNGs under ./{out_dir}")
+
+if __name__ == "__main__":
+    main()
