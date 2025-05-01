@@ -10,7 +10,7 @@ from functools import partial
 from torch.utils.data import DataLoader
 from transformer_lens import HookedTransformer
 from analysis.correlations import summarize_correlation_matrix, flatten_layers
-
+import numpy as np
 
 class StreamingPearsonComputer:
     def __init__(self, model_1, model_2, device='cpu'):
@@ -242,6 +242,28 @@ if __name__ == '__main__':
             args.token_dataset
         )
     )
+
+    max_length = model_1.cfg.n_ctx
+
+    tokenized_dataset = tokenized_dataset.map(
+        lambda x: {
+            "tokens": [
+                np.clip(
+                    seq[:max_length] + [0] * (max_length - len(seq)),  # Pad with zeros
+                    0,
+                    model_1.cfg.d_vocab - 1
+                )
+                for seq in x["tokens"]
+            ]
+        },
+        batched=True,
+        batch_size=args.batch_size
+    )
+
+    #set data format
+    tokenized_dataset.set_format(type='torch', columns=['tokens'])
+    if 'tokens' not in tokenized_dataset.column_names:
+        raise KeyError("Missing tokens column")
 
     correlation = run_correlation_experiment(
         args, model_1, model_2, tokenized_dataset)
