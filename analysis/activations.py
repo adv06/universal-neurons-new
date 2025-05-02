@@ -1,107 +1,216 @@
-import torch
+import os
+import pickle
 import einops
+import torch
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objs as go
+import sys
+sys.path.append("/content/universal-neurons-new")  
+from utils import vector_histogram
+import argparse
+
+def load_correlation_results(
+        model_1_name, model_2_name, dataset, correlation_computation,
+        return_np=False, result_dir='correlation_results'):
+    file_path = "/content/universal-neurons-new/correlation_results/stanford-crfm/battlestar-gpt2-small-x49+stanford-crfm/alias-gpt2-small-x21/pile/pearson.rotation/correlation.pt"
+
+    correlation_data = torch.load(file_path, map_location='cpu')
+    if return_np:
+        correlation_data = correlation_data.numpy()
+    return correlation_data
 
 
-def make_dataset_df(ds, decoded_vocab):
-    tokens = ds['tokens']
-    subset = ds['subset']
-    n, d = tokens.shape
-
-    sequence_subset = einops.repeat(np.array(subset), 'n -> n d', d=d)
-    sequence_ix = einops.repeat(np.arange(n), 'n -> n d', d=d)
-    position = einops.repeat(np.arange(d), 'd -> n d', n=n)
-
-    prev_tokens = torch.concat(
-        [torch.zeros(n, 1, dtype=int) - 1, tokens[:, :-1]], dim=1)
-
-    dataset_df = pd.DataFrame({
-        'token': tokens.flatten().numpy(),
-        'prev_token': prev_tokens.flatten().numpy(),
-        'token_str': [decoded_vocab[t] for t in tokens.flatten().numpy()],
-        'subset': sequence_subset.flatten(),
-        'sequence_ix': sequence_ix.flatten(),
-        'position': position.flatten(),
-    })
-    return dataset_df
+def flatten_layers(correlation_data):
+    return einops.rearrange(correlation_data, 'l1 n1 l2 n2 -> (l1 n1) (l2 n2)')
 
 
-def compute_moments_from_binned_data(bin_edges, bin_counts):
-
-    bin_edges = torch.tensor(np.concatenate([
-        np.array([bin_edges[0] + bin_edges[0] - bin_edges[1]]),
-        bin_edges,
-        np.array([bin_edges[-1] + bin_edges[-1] - bin_edges[-2]])
-    ]))
-    bin_centers = (bin_edges[1:] + bin_edges[:-1]) / 2
-
-    total_frequency = bin_counts.sum(axis=-1)
-    mean = (bin_centers * bin_counts).sum(axis=-1) / total_frequency
-    variance = (((-mean[:, :, None] + bin_centers) ** 2)
-                * bin_counts).sum(axis=-1) / total_frequency
-    skewness = (((-mean[:, :, None] + bin_centers) ** 3) *
-                bin_counts).sum(axis=-1) / (total_frequency * (variance ** 1.5))
-    kurtosis = (((-mean[:, :, None] + bin_centers) ** 4) *
-                bin_counts).sum(axis=-1) / (total_frequency * (variance ** 2))
-    return mean, variance, skewness, kurtosis
-
-
-def make_pile_subset_distribution_activation_summary_df(dataset_summaries, bin_edges, include_all=False):
-    if include_all:
-        full_distribution_bin_count = sum(
-            dataset_summaries[k]['neuron_bin_counts']
-            for k in dataset_summaries.keys()
-        )
-        dataset_summaries['all'] = {}
-        dataset_summaries['all']['neuron_bin_counts'] = full_distribution_bin_count
-
-    neuron_moment_dict = {}
-    for distr in dataset_summaries:
-        bin_counts = dataset_summaries[distr]['neuron_bin_counts']
-        mean, variance, skewness, kurtosis = compute_moments_from_binned_data(
-            bin_edges, bin_counts)
-        neuron_moment_dict[('mean', distr)] = mean.flatten()
-        neuron_moment_dict[('var', distr)] = variance.flatten()
-        neuron_moment_dict[('skew', distr)] = skewness.flatten()
-        neuron_moment_dict[('kurt', distr)] = kurtosis.flatten()
-
-    n_layers, d_mlp = mean.shape
-
-    neuron_moment_df = pd.DataFrame(
-        neuron_moment_dict,
-        index=pd.MultiIndex.from_product([range(n_layers), range(d_mlp)])
+def unflatten_layers(correlation_data, m1_layers, m2_layers=None):
+    if m2_layers is None:
+        m2_layers = m1_layers
+    return einops.rearrange(
+        correlation_data, '(l1 n1) (l2 n2) -> l1 n1 l2 n2',
+        l1=m1_layers, l2=m2_layers
     )
-    neuron_moment_df.index.names = ['layer', 'neuron']
-
-    if include_all:  # clean up
-        del dataset_summaries['all']
-
-    return neuron_moment_df[['mean', 'var', 'skew', 'kurt']]
 
 
-def get_activation_sparsity_df(dataset_summaries, bin_edges):
-    zero_bin = np.argmax(bin_edges >= 0).item()
-    subset_bin_counts = {}
-    subset_sparsity = {}
-    for dataset_name, dataset_summary in dataset_summaries.items():
-        subset_bin_counts[dataset_name] = dataset_summary['neuron_bin_counts']
-        sparsity = dataset_summary['neuron_bin_counts'][:, :, zero_bin:].sum(
-            axis=-1) / dataset_summary['neuron_bin_counts'].sum(axis=-1)
-        subset_sparsity[dataset_name] = sparsity.numpy()
+def summarize_correlation_matrix(correlation_matrix):
+    # compute distribution summary
+    bin_edges = torch.linspace(-1, 1, 100)
 
-    total_bin_counts = sum([v for v in subset_bin_counts.values()])
-    total_sparsity = total_bin_counts[:, :, zero_bin:].sum(
-        axis=-1) / total_bin_counts.sum(axis=-1)
-    subset_sparsity['all'] = total_sparsity
+    bin_counts = vector_histogram(correlation_matrix, bin_edges)
 
-    n_layer, n_neuron = subset_sparsity[list(subset_sparsity.keys())[0]].shape
-    sparsity_df = pd.DataFrame({
-        k: sparsity_tensor.flatten() for k, sparsity_tensor in subset_sparsity.items()
-    }, index=pd.MultiIndex.from_product([range(n_layer), range(n_neuron)]))
-    sparsity_df.index.names = ['layer', 'neuron']
-    return sparsity_df
+    # compute left and right tails
+    max_tail_v, max_tail_ix = torch.topk(
+        correlation_matrix, 50, dim=1, largest=True)
+    min_tail_v, min_tail_ix = torch.topk(
+        correlation_matrix, 50, dim=1, largest=False)
+
+    max_v, max_ix = torch.max(correlation_matrix, dim=1)
+    min_v, min_ix = torch.min(correlation_matrix, dim=1)
+
+    # compute corr distribution moments
+    corr_mean = correlation_matrix.mean(dim=1)
+    corr_diffs = correlation_matrix - corr_mean[:, None]
+    corr_var = torch.mean(torch.pow(corr_diffs, 2.0), dim=1)
+    corr_std = torch.pow(corr_var, 0.5)
+    corr_zscore = corr_diffs / corr_std[:, None]
+    corr_skew = torch.mean(torch.pow(corr_zscore, 3.0), dim=1)
+    corr_kurt = torch.mean(torch.pow(corr_zscore, 4.0), dim=1)
+
+    correlation_summary = {
+        'diag_corr': correlation_matrix.diagonal().to(torch.float16),
+        'obo_corr': torch.diag(correlation_matrix, diagonal=1).to(torch.float16),
+        'bin_counts': bin_counts.to(torch.int32),
+        'max_corr': max_v.to(torch.float16),
+        'max_corr_ix': max_ix.to(torch.int32),
+        'min_corr': min_v.to(torch.float16),
+        'min_corr_ix': min_ix.to(torch.int32),
+        'max_tail_corr': max_tail_v.to(torch.float16),
+        'max_tail_corr_ix': max_tail_ix.to(torch.int32),
+        'min_tail_corr': min_tail_v.to(torch.float16),
+        'min_tail_corr_ix': min_tail_ix.to(torch.int32),
+        'corr_mean': corr_mean.to(torch.float16),
+        'corr_var': corr_var.to(torch.float16),
+        'corr_skew': corr_skew.to(torch.float16),
+        'corr_kurt': corr_kurt.to(torch.float16)
+    }
+    return correlation_summary
 
 
-def make_full_distribution_activation_summary_df(dataset_summaries, bin_edges):
-    pass
+def make_correlation_result_df(model_a, model_b, dataset, metric, baseline_metric, result_dir='correlation_results'):
+    corr_data = load_correlation_results(
+        model_a, model_b, dataset, metric, return_np=True, result_dir=result_dir)
+    n_layers_m1, n_neurons_m1, n_layers_m2, n_neurons_m2 = corr_data.shape
+    corr_data = flatten_layers(corr_data)
+    if np.isnan(corr_data).any():
+        print(f'Warning: setting {np.isnan(corr_data).sum()} nans to zero')
+        corr_data = np.nan_to_num(corr_data, nan=0.0)
+    max_corr = corr_data.max(axis=1)
+    max_corr_ix = corr_data.argmax(axis=1)
+    corr_data_diag = np.diag(corr_data)
+    del corr_data
+
+    baseline_corr_data = load_correlation_results(
+        model_a, model_b, dataset, baseline_metric,
+        return_np=True, result_dir=result_dir
+    )
+    baseline_corr_data = flatten_layers(baseline_corr_data)
+    baseline_max_corr = baseline_corr_data.max(axis=1)
+    baseline_max_corr_ix = baseline_corr_data.argmax(axis=1)
+    del baseline_corr_data
+
+    max_sim = np.unravel_index(max_corr_ix, (n_layers_m2, n_neurons_m2))
+    baseline_max_sim = np.unravel_index(
+        baseline_max_corr_ix, (n_layers_m2, n_neurons_m2))
+
+    corr_df = pd.DataFrame({
+        'max_corr': max_corr,
+        'max_sim_layer': max_sim[0],
+        'max_sim_neuron': max_sim[1],
+        'diag_corr': corr_data_diag,
+        'baseline': baseline_max_corr,
+        'baseline_layer': baseline_max_sim[0]
+    }, index=pd.MultiIndex.from_product([range(n_layers_m1), range(n_neurons_m1)]))
+    corr_df.index.names = ['layer', 'neuron']
+
+    return corr_df
+
+
+def plot_correlation_vs_baseline(corr_df, plot_type='scatter', n_cols=6, title=''):
+    n_cols = 6
+    n_rows = 4 if corr_df.reset_index().layer.max() == 23 else 2
+    fig, axs = plt.subplots(n_rows, n_cols, figsize=(15, 10 if n_rows == 4 else 5))
+    for ix, (layer, layer_df) in enumerate(corr_df.reset_index().groupby('layer')):
+        ax = axs[ix//n_cols, ix % n_cols]
+        if plot_type == 'scatter':
+            ax.scatter(layer_df.baseline.values,
+                       layer_df.max_corr.values, alpha=0.25, s=2)
+        elif plot_type == 'histplot':
+            sns.histplot(data=layer_df, x='baseline', y='max_corr', ax=ax)
+        ax.set_title(f'Layer {layer}')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        # diag line
+        ax.plot([0, 1], [0, 1], transform=ax.transAxes,
+                ls='--', c='red', alpha=0.5)
+    if title:
+        fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig("correlation_vs_baseline.png", dpi=300, bbox_inches="tight")
+    plt.show()
+
+
+def plotly_scatter_corr_by_layer(corr_df):
+    data = []
+    for layer, lg in corr_df.reset_index().groupby('layer'):
+        trace = go.Scatter(
+            x=lg['baseline'],
+            y=lg['max_corr'],
+            mode='markers',
+            name=layer,
+            marker=dict(
+                size=3,
+                opacity=0.3
+            ),
+            text=lg['neuron'],  # Hover text
+            hoverinfo=['x', 'y', 'text']  # Only show the hover text
+        )
+        data.append(trace)
+
+    layout = go.Layout(
+        title='Plot',
+        xaxis=dict(
+            title='baseline'
+        ),
+        yaxis=dict(
+            title='max_corr'
+        ),
+        showlegend=True
+    )
+
+    fig = go.Figure(data=data, layout=layout)
+    fig.show()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '--model_1_name', default='pythia-70m',
+        help='Name of model from TransformerLens')
+    parser.add_argument(
+        '--model_2_name', default='pythia-70m-v0')
+    parser.add_argument(
+        '--token_dataset', type=str)
+
+    parser.add_argument(
+        '--baseline', type=str, default='none',
+        choices=['none', 'gaussian', 'permutation', 'rotation'])
+    parser.add_argument(
+        '--similarity_type', type=str, default='pearson',
+        choices=['pearson', 'jaccard', 'cosine'])
+    parser.add_argument(
+        '--jaccard_threshold', type=float, default=0)
+
+    parser.add_argument(
+        '--batch_size', default=32, type=int)
+    parser.add_argument(
+        '--model_1_device', type=str, default='cpu')
+    parser.add_argument(
+        '--model_2_device', type=str, default='cpu')
+    parser.add_argument(
+        '--correlation_device', type=str, default='cpu')
+
+    parser.add_argument(
+        '--save_full_correlation_matrix', action='store_true',
+        help='Whether to save the full correlation matrix (always save the summary)')
+    parser.add_argument(
+        '--save_precision', type=int, default=16, choices=[8, 16, 32],
+        help='Number of bits to use for saving full correlation matrix')
+    args = parser.parse_args()
+    plot_correlation_vs_baseline(make_correlation_result_df(args.model_1_name, args.model_2_name, args.token_dataset, args.similarity_type, args.baseline))
+    
+
