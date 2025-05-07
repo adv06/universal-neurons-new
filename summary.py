@@ -212,9 +212,15 @@ if __name__ == '__main__':
         args.model, device=device, checkpoint_value=args.checkpoint
     ).to(device).eval()
     torch.set_grad_enabled(False)
-    # model_family = get_model_family(args.model)
+    model_family = get_model_family(args.model)
 
-    tokenized_dataset = datasets.load_from_disk("/content/universal-neurons-new/token_datasets/gpt2/pile")
+    tokenized_dataset = datasets.load_from_disk(
+        os.path.join(
+            os.getenv('DATASET_DIR', 'token_datasets'),
+            model_family,
+            args.token_dataset
+        )
+    )
     max_length = model.cfg.n_ctx
 
     tokenized_dataset = tokenized_dataset.map(
