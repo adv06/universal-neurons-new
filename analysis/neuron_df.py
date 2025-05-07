@@ -2,14 +2,24 @@ import pandas as pd
 import torch
 from transformer_lens import HookedTransformer
 
-from summary_viewer import load_all_summaries, load_weights_summary
-from .activations import get_activation_sparsity_df, make_pile_subset_distribution_activation_summary_df
-from .weights import neuron_vocab_cosine_moments
+import sys
+import os
+sys.path.insert(0, os.path.abspath("."))
+import numpy as np
+# 2) Then add your project root if you still need it:
+PROJECT_ROOT = "/content/universal-neurons-new"
+sys.path.insert(1, PROJECT_ROOT)
 
 
-def make_neuron_stat_df(model_name):
-    dataset_summaries = load_all_summaries(model_name)
+from summary_viewer import load_dataset_summary, load_weights_summary
+from activations import get_activation_sparsity_df, make_pile_subset_distribution_activation_summary_df
+from weights import neuron_vocab_cosine_moments
+
+
+def make_neuron_stat_df(model_name, dataset_name):
+    dataset_summaries = load_dataset_summary(model_name, dataset_name)
     weight_summaries = load_weights_summary(model_name)
+    dataset_summaries = {dataset_name: dataset_summaries}
 
     neuron_df = weight_summaries['neuron_stats']
     neuron_df = neuron_df.rename(
@@ -89,3 +99,13 @@ def make_corr_compare_df(all_corr_df):
     }).reset_index().set_index(['layer', 'neuron'])
 
     return compare_df
+
+if __name__ == '__main__':
+  cool = make_neuron_stat_df("gpt2", "pile")
+  # assuming stat_df is your DataFrame
+  csv_path = "stat_summary.csv"          # or any path you choose
+  cool.to_csv(csv_path, index=True)   # index=True to include the index; False to drop it
+  print(f"Saved CSV to {csv_path}")
+
+
+  
