@@ -217,7 +217,7 @@ if __name__ == '__main__':
     tokenized_dataset = datasets.load_from_disk(
         os.path.join(
             os.getenv('DATASET_DIR', 'token_datasets'),
-            model_family,
+            args.model,
             args.token_dataset
         )
     )
