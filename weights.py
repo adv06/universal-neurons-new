@@ -231,8 +231,8 @@ if __name__ == '__main__':
     torch.set_grad_enabled(False)
     model = HookedTransformer.from_pretrained(
         args.model,
-        device=device # ,
-        # checkpoint_value=args.checkpoint
+        device=device,
+        checkpoint_value=args.checkpoint
     )
     model.to(device)
 
