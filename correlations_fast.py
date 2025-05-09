@@ -193,7 +193,10 @@ if __name__ == '__main__':
         '--model_2_name', default='pythia-70m-v0')
     parser.add_argument(
         '--token_dataset', type=str)
-
+    parser.add_argument(
+        '--model_1_checkpoint', type=int, default=None)
+    parser.add_argument(
+        '--model_2_checkpoint', type=int, default=None)
     parser.add_argument(
         '--baseline', type=str, default='none',
         choices=['none', 'gaussian', 'permutation', 'rotation'])
@@ -224,12 +227,16 @@ if __name__ == '__main__':
     t.autograd.set_grad_enabled(False)
 
     model_1 = HookedTransformer.from_pretrained(
-        args.model_1_name, device='cpu')
+        args.model_1_name, ,
+        checkpoint_value=args.model_1_checkpoint,
+        device='cpu')
     model_1.to(args.model_1_device)
     model_1.eval()
 
     model_2 = HookedTransformer.from_pretrained(
-        args.model_2_name, device='cpu')
+        args.model_2_name, 
+        checkpoint_value=args.model_2_checkpoint,
+        device='cpu')
     model_2.to(args.model_2_device)
     model_2.eval()
 
