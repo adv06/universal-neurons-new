@@ -209,7 +209,7 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = HookedTransformer.from_pretrained(
-        args.model, device=device, checkpoint_value=args.checkpoint
+        args.model, device=device #, checkpoint_value=args.checkpoint
     ).to(device).eval()
     torch.set_grad_enabled(False)
     model_family = get_model_family(args.model)
@@ -217,7 +217,7 @@ if __name__ == '__main__':
     tokenized_dataset = datasets.load_from_disk(
         os.path.join(
             os.getenv('DATASET_DIR', 'token_datasets'),
-            args.model,
+            model_family,
             args.token_dataset
         )
     )
