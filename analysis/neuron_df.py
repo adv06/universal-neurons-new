@@ -10,15 +10,15 @@ import numpy as np
 PROJECT_ROOT = "/content/universal-neurons-new"
 sys.path.insert(1, PROJECT_ROOT)
 
-
+import argparse
 from summary_viewer import load_dataset_summary, load_weights_summary
 from activations import get_activation_sparsity_df, make_pile_subset_distribution_activation_summary_df
 from weights import neuron_vocab_cosine_moments
 from correlations import make_correlation_result_df
 
-def make_neuron_stat_df(model_name, dataset_name):
-    dataset_summaries = load_dataset_summary(model_name, dataset_name)
-    weight_summaries = load_weights_summary(model_name)
+def make_neuron_stat_df(model_name, dataset_name, checkpoint):
+    dataset_summaries = load_dataset_summary(model_name, dataset_name, checkpoint)
+    weight_summaries = load_weights_summary(model_name, checkpoint)
     dataset_summaries = {dataset_name: dataset_summaries}
 
     neuron_df = weight_summaries['neuron_stats']
@@ -101,8 +101,7 @@ def make_corr_compare_df(all_corr_df):
     return compare_df
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
         '--model_1_name', default='pythia-70m',
         help='Name of model from TransformerLens')
@@ -139,8 +138,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
 
-    no_c = make_neuron_stat_df("gpt2", "pile")
-    c = make_correlation_result_df(args.model_1_name, args.model_2_name, args.token_dataset, args.similarity_type, args.baseline, result_dir='correlation_results')
+    no_c = make_neuron_stat_df(args.model_1_name, args.token_dataset, None)
+    c = make_correlation_result_df(args.model_1_name, args.model_2_name, args.token_dataset, f'{args.similarity_type}.none', f'{args.similarity_type}.{args.baseline}', result_dir='correlation_results')
     combined_df = pd.concat([no_c, c], axis=1)
     combined_df.to_csv('combined_neuron_stats.csv', index=False)
     
