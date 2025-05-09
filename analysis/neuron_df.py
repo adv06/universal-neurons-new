@@ -14,7 +14,7 @@ sys.path.insert(1, PROJECT_ROOT)
 from summary_viewer import load_dataset_summary, load_weights_summary
 from activations import get_activation_sparsity_df, make_pile_subset_distribution_activation_summary_df
 from weights import neuron_vocab_cosine_moments
-
+from correlations import make_correlation_result_df
 
 def make_neuron_stat_df(model_name, dataset_name):
     dataset_summaries = load_dataset_summary(model_name, dataset_name)
@@ -101,11 +101,48 @@ def make_corr_compare_df(all_corr_df):
     return compare_df
 
 if __name__ == '__main__':
-  cool = make_neuron_stat_df("gpt2", "pile")
-  # assuming stat_df is your DataFrame
-  csv_path = "stat_summary.csv"          # or any path you choose
-  cool.to_csv(csv_path, index=True)   # index=True to include the index; False to drop it
-  print(f"Saved CSV to {csv_path}")
+  parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '--model_1_name', default='pythia-70m',
+        help='Name of model from TransformerLens')
+    parser.add_argument(
+        '--model_2_name', default='pythia-70m-v0')
+    parser.add_argument(
+        '--token_dataset', type=str)
 
+    parser.add_argument(
+        '--baseline', type=str, default='none',
+        choices=['none', 'gaussian', 'permutation', 'rotation'])
+    parser.add_argument(
+        '--similarity_type', type=str, default='pearson',
+        choices=['pearson', 'jaccard', 'cosine'])
+    parser.add_argument(
+        '--jaccard_threshold', type=float, default=0)
+
+    parser.add_argument(
+        '--batch_size', default=32, type=int)
+    parser.add_argument(
+        '--model_1_device', type=str, default='cpu')
+    parser.add_argument(
+        '--model_2_device', type=str, default='cpu')
+    parser.add_argument(
+        '--correlation_device', type=str, default='cpu')
+
+    parser.add_argument(
+        '--save_full_correlation_matrix', action='store_true',
+        help='Whether to save the full correlation matrix (always save the summary)')
+    parser.add_argument(
+        '--save_precision', type=int, default=16, choices=[8, 16, 32],
+        help='Number of bits to use for saving full correlation matrix')
+
+    args = parser.parse_args()
+
+
+    no_c = make_neuron_stat_df("gpt2", "pile")
+    c = make_correlation_result_df(args.model_1_name, args.model_2_name, args.token_dataset, args.similarity_type, args.baseline, result_dir='correlation_results')
+    combined_df = pd.concat([no_c, c], axis=1)
+    combined_df.to_csv('combined_neuron_stats.csv', index=False)
+    
 
   
