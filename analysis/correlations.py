@@ -14,6 +14,8 @@ def load_correlation_results(
         model_1_name, model_2_name, dataset, correlation_computation,
         return_np=False, result_dir='correlation_results'):
     file_path = os.path.join(
+        "/content",
+        "universal-neurons-new",
         result_dir,
         f'{model_1_name}+{model_2_name}',
         dataset,
