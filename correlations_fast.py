@@ -227,7 +227,7 @@ if __name__ == '__main__':
     t.autograd.set_grad_enabled(False)
 
     model_1 = HookedTransformer.from_pretrained(
-        args.model_1_name, ,
+        args.model_1_name,
         checkpoint_value=args.model_1_checkpoint,
         device='cpu')
     model_1.to(args.model_1_device)
