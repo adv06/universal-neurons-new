@@ -14,9 +14,15 @@ import plotly.graph_objs as go
 
 ### LOADING FUNCTIONS ###
 
-def load_dataset_summary(model_name, dataset_name):
+def load_dataset_summary(model_name, dataset_name, checkpoint):
+
     path = os.path.join(
-        'summary_data', model_name, 'activations', dataset_name)
+        "summary_data",
+        model_name,
+        'activations',
+        str(checkpoint),
+        dataset_name,
+    )
     summary_dict = {}
     for data_file in os.listdir(path):
         if data_file.endswith('.pt'):
@@ -41,8 +47,8 @@ def load_all_summaries(model_name):
     return dataset_summaries
 
 
-def load_weights_summary(model_name):
-    data_dir = os.path.join('summary_data', model_name, 'weights')
+def load_weights_summary(model_name, checkpoint):
+    os.path.join("weight_data", model_name, 'weights', str(checkpoint))
     weights_data = {}
     for filename in os.listdir(data_dir):
         if filename.endswith('.pt'):
