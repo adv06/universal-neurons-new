@@ -12,9 +12,9 @@ sys.path.insert(1, PROJECT_ROOT)
 
 import argparse
 from summary_viewer import load_dataset_summary, load_weights_summary
-from activations import get_activation_sparsity_df, make_pile_subset_distribution_activation_summary_df
-from weights import neuron_vocab_cosine_moments
-from correlations import make_correlation_result_df
+from analysis.activations import get_activation_sparsity_df, make_pile_subset_distribution_activation_summary_df
+from analysis.weights import neuron_vocab_cosine_moments
+from analysis.correlations import make_correlation_result_df
 
 def make_neuron_stat_df(model_name, dataset_name, checkpoint):
     dataset_summaries = load_dataset_summary(model_name, dataset_name, checkpoint)
