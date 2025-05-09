@@ -17,6 +17,8 @@ import plotly.graph_objs as go
 def load_dataset_summary(model_name, dataset_name, checkpoint):
 
     path = os.path.join(
+        "/content",
+        "universal-neurons-new",
         "summary_data",
         model_name,
         'activations',
@@ -48,7 +50,8 @@ def load_all_summaries(model_name):
 
 
 def load_weights_summary(model_name, checkpoint):
-    os.path.join("weight_data", model_name, 'weights', str(checkpoint))
+    data_dir = os.path.join("/content",
+        "universal-neurons-new", "weight_data", model_name, 'weights', str(checkpoint))
     weights_data = {}
     for filename in os.listdir(data_dir):
         if filename.endswith('.pt'):
