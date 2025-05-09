@@ -134,11 +134,11 @@ if __name__ == '__main__':
     parser.add_argument(
         '--save_precision', type=int, default=16, choices=[8, 16, 32],
         help='Number of bits to use for saving full correlation matrix')
-
+    parser.add_argument('--checkpoint', type=int, default=None)  
     args = parser.parse_args()
 
 
-    no_c = make_neuron_stat_df(args.model_1_name, args.token_dataset, None)
+    no_c = make_neuron_stat_df(args.model_1_name, args.token_dataset, args.checkpoint)
     c = make_correlation_result_df(args.model_1_name, args.model_2_name, args.token_dataset, f'{args.similarity_type}.none', f'{args.similarity_type}.{args.baseline}', result_dir='correlation_results')
     combined_df = pd.concat([no_c, c], axis=1)
     combined_df.to_csv('combined_neuron_stats.csv', index=False)
